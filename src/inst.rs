@@ -25,7 +25,7 @@ pub enum Inst {
     /// Ranges requires the regex program to match the character at the current
     /// position in the input with one of the ranges specified in InstRanges.
     Ranges(InstRanges),
-    // Bytes(InstBytes),
+    Bytes(InstBytes),
 }
 
 /// Representation of the Save instruction.
@@ -142,9 +142,9 @@ impl InstRanges {
     }
 }
 
-// #[derive(Clone, Debug)]
-// pub struct InstBytes {
-    // pub goto: InstIdx,
-    // pub start: u8,
-    // pub end: u8,
-// }
+#[derive(Clone, Debug)]
+pub struct InstBytes {
+    pub goto: InstIdx,
+    pub start: u8,
+    pub end: u8,
+}

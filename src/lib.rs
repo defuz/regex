@@ -398,7 +398,9 @@
 //! some other regular expression engines. (We pay for this by disallowing
 //! features like arbitrary look-ahead and backreferences.)
 
-#![deny(missing_docs)]
+#![allow(dead_code, unused_mut, unused_variables)]
+
+// #![deny(missing_docs)]
 #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(feature = "pattern", feature(pattern))]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -408,6 +410,7 @@
 extern crate aho_corasick;
 extern crate memchr;
 extern crate regex_syntax as syntax;
+extern crate utf8_ranges;
 
 pub use re::{
     Regex, Error, Captures, SubCaptures, SubCapturesPos, SubCapturesNamed,

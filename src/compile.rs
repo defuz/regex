@@ -12,12 +12,13 @@ use std::collections::HashSet;
 use std::iter;
 
 use syntax::{Expr, Repeater, CharClass, ClassRange};
+use utf8_ranges::{Utf8Sequence, Utf8Sequences};
 
 use Error;
 use inst::{
     EmptyLook,
     Inst, InstIdx,
-    InstSave, InstSplit, InstEmptyLook, InstChar, InstRanges,
+    InstSave, InstSplit, InstEmptyLook, InstChar, InstRanges, InstBytes,
 };
 
 pub type Compiled = (Vec<Inst>, Vec<Option<String>>);
@@ -31,15 +32,27 @@ pub struct Compiler {
     insts: Vec<MaybeInst>,
     cap_names: Vec<Option<String>>,
     seen_caps: HashSet<usize>,
+    bytes: bool,
 }
 
 impl Compiler {
-    pub fn new(size_limit: usize) -> Compiler {
+    /// Create a new regular expression compiler.
+    ///
+    /// The size of the resulting progrom is limited by size_limit. If the
+    /// program exceeds the given size (in bytes), then compilation will return
+    /// an error.
+    ///
+    /// If bytes is true, then the program is compiled as a byte based
+    /// automaton, which incorporates UTF-8 decoding into the machine. If it's
+    /// false, then the automaton is Unicode scalar value based, e.g., an
+    /// engine utilizing such an automaton is resposible for UTF-8 decoding.
+    pub fn new(size_limit: usize, bytes: bool) -> Compiler {
         Compiler {
             size_limit: size_limit,
             insts: vec![],
             cap_names: vec![None],
             seen_caps: HashSet::new(),
+            bytes: bytes,
         }
     }
 
@@ -111,15 +124,16 @@ impl Compiler {
                 self.fill_to_next(prev_hole);
                 let class = CharClass::new(vec![
                     ClassRange { start: c, end: c },
-                ]);
-                prev_hole = try!(self.c(&Expr::Class(class.case_fold())));
+                ]).case_fold();
+                let ranges = class.iter().map(|c| (c.start, c.end));
+                prev_hole = try!(self.c_class(ranges));
             }
             Ok(prev_hole)
         } else {
             let mut prev_hole = Hole::None;
             for &c in chars {
                 self.fill_to_next(prev_hole);
-                prev_hole = self.push_hole(InstHole::Char { c: c });
+                prev_hole = try!(self.c_class(Some((c, c))));
             }
             Ok(prev_hole)
         }
@@ -127,12 +141,19 @@ impl Compiler {
 
     fn c_class<I>(&mut self, ranges: I) -> CompileResult
             where I: IntoIterator<Item=(char, char)> {
-        let ranges: Vec<(char, char)> = ranges.into_iter().collect();
-        Ok(if ranges.len() == 1 && ranges[0].0 == ranges[0].1 {
-            self.push_hole(InstHole::Char { c: ranges[0].0 })
+        if self.bytes {
+            CompileClass {
+                c: self,
+                ranges: Some(ranges.into_iter()),
+            }.compile()
         } else {
-            self.push_hole(InstHole::Ranges { ranges: ranges })
-        })
+            let ranges: Vec<(char, char)> = ranges.into_iter().collect();
+            Ok(if ranges.len() == 1 && ranges[0].0 == ranges[0].1 {
+                self.push_hole(InstHole::Char { c: ranges[0].0 })
+            } else {
+                self.push_hole(InstHole::Ranges { ranges: ranges })
+            })
+        }
     }
 
     fn c_empty_look(&mut self, look: EmptyLook) -> CompileResult {
@@ -465,7 +486,7 @@ enum InstHole {
     EmptyLook { look: EmptyLook },
     Char { c: char },
     Ranges { ranges: Vec<(char, char)> },
-    // Bytes { start: u8, end: u8 },
+    Bytes { start: u8, end: u8 },
 }
 
 impl InstHole {
@@ -487,12 +508,51 @@ impl InstHole {
                 goto: goto,
                 ranges: ranges.clone(),
             }),
-            // InstHole::Bytes { start, end } => Inst::Bytes(InstBytes {
-                // goto: goto,
-                // start: start,
-                // end: end,
-            // }),
+            InstHole::Bytes { start, end } => Inst::Bytes(InstBytes {
+                goto: goto,
+                start: start,
+                end: end,
+            }),
         }
+    }
+}
+
+struct CompileClass<'a, I> {
+    c: &'a mut Compiler,
+    ranges: Option<I>,
+}
+
+impl<'a, I: Iterator<Item=(char, char)>> CompileClass<'a, I> {
+    fn compile(mut self) -> CompileResult {
+        let mut holes = vec![];
+        let mut it = self
+            .ranges.take().unwrap()
+            .flat_map(|(start, end)| Utf8Sequences::new(start, end))
+            .peekable();
+        let mut utf8_seq = it.next().expect("non-empty char class");
+        while it.peek().is_some() {
+            let split = self.c.push_split_hole();
+            let goto1 = self.c.insts.len();
+            holes.push(try!(self.c_utf8_sequence(&utf8_seq)));
+            let goto2 = self.c.insts.len();
+            self.c.fill_split(split, Some(goto1), Some(goto2));
+
+            utf8_seq = it.next().unwrap();
+        }
+        holes.push(try!(self.c_utf8_sequence(&utf8_seq)));
+        Ok(Hole::Many(holes))
+    }
+
+    fn c_utf8_sequence(&mut self, seq: &Utf8Sequence) -> CompileResult {
+        let mut prev_hole = Hole::None;
+        for byte_range in seq {
+            self.c.fill_to_next(prev_hole);
+            prev_hole = self.c.push_hole(InstHole::Bytes {
+                start: byte_range.start,
+                end: byte_range.end,
+            });
+        }
+        Ok(prev_hole)
     }
 }
 
