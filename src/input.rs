@@ -14,6 +14,21 @@ use std::str;
 use char::Char;
 use prefix::Prefix;
 
+pub trait InputReader {
+    type Reader: Input;
+}
+
+pub struct StringInputReader;
+pub struct BytesInputReader;
+
+impl<'t> InputReader for StringInputReader {
+    type Reader = CharInput<'t>;
+}
+
+impl<'t> InputReader for BytesInputReader {
+    type Reader = ByteInput<'t>;
+}
+
 /// An abstraction over input used in the matching engines.
 pub trait Input {
     /// A representation of a position in the input.

@@ -23,7 +23,7 @@
 // the capture groups. In benchmarks, the backtracking engine is roughly twice
 // as fast as the full NFA simulation.
 
-use input::{Input, ByteInput};
+use input::{InputReader, Input, ByteInput};
 use inst::InstIdx;
 use program::Program;
 use re::CaptureIdxs;
@@ -42,7 +42,7 @@ const MAX_INPUT_SIZE: usize = 256 * (1 << 10);
 
 /// A backtracking matching engine.
 #[derive(Debug)]
-pub struct Backtrack<'a, 'r, 't, 'c, I: 't> {
+pub struct Backtrack<'a, 'r, 't, 'c, I> {
     prog: &'r Program,
     input: I,
     caps: &'c mut CaptureIdxs,
@@ -59,7 +59,7 @@ pub struct BackMachine<I> {
     visited: Vec<Bits>,
 }
 
-impl<I: Input> BackMachine<I> {
+impl<I: InputReader> BackMachine<I> {
     /// Create new empty state for the backtracking engine.
     pub fn new() -> BackMachine<I> {
         BackMachine {
@@ -76,20 +76,21 @@ impl<I: Input> BackMachine<I> {
 /// engine must keep track of old capture group values. We use the explicit
 /// stack to do it.
 #[derive(Clone, Copy, Debug)]
-enum Job<I: Input> {
-    Inst { pc: InstIdx, at: I::At },
+enum Job<I: InputReader> {
+    Inst { pc: InstIdx, at: <<I as InputReader>::Reader as Input>::At },
     SaveRestore { slot: usize, old_pos: Option<usize> },
 }
 
-impl<'a, 'r, 't, 'c, I: 't + Input> Backtrack<'a, 'r, 't, 'c, I> {
+impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
     /// Execute the backtracking matching engine.
     ///
     /// If there's a match, `exec` returns `true` and populates the given
     /// captures accordingly.
     pub fn exec<I: Input>(
         prog: &'r Program,
+        rdr: I,
         mut caps: &mut CaptureIdxs,
-        input: I,
+        input: I::Reader,
         start: usize,
     ) -> bool {
         let start = input.at(start);

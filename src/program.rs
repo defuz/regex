@@ -13,7 +13,7 @@ use syntax;
 use Error;
 use backtrack::{Backtrack, BackMachine};
 use compile::Compiler;
-use input::{ByteInput, CharInput};
+use input::{BytesInputReader, InputReader, ByteInput, CharInput};
 use inst::{EmptyLook, Inst};
 use nfa::{Nfa, NfaThreads};
 use pool::Pool;
@@ -117,9 +117,12 @@ impl Program {
         text: &str,
         start: usize,
     ) -> bool {
+        let rdr = BytesInputReader;
         let inp = ByteInput::new(text);
         match self.choose_engine(caps.len(), text.as_bytes()) {
-            MatchEngine::Backtrack => Backtrack::exec(self, caps, inp, start),
+            MatchEngine::Backtrack => {
+                Backtrack::exec(self, rdr, caps, inp, start)
+            }
             MatchEngine::Nfa => Nfa::exec(self, caps, inp, start),
             MatchEngine::Literals => {
                 match self.prefixes.find(&text[start..]) {
