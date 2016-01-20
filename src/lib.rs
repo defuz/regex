@@ -421,6 +421,7 @@ pub use re::{
 
 mod backtrack;
 mod char;
+mod char_utf8;
 mod compile;
 mod input;
 mod inst;

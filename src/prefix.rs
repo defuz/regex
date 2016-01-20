@@ -45,24 +45,24 @@ pub enum Prefix {
     },
     Single(SingleSearch),
     /// A full Aho-Corasick DFA automaton.
-    Automaton(FullAcAutomaton<String>),
+    Automaton(FullAcAutomaton<Vec<u8>>),
 }
 
 impl Prefix {
     /// Create a new prefix matching machine.
-    pub fn new(mut pfxs: Vec<String>) -> Prefix {
+    pub fn new(mut pfxs: Vec<Vec<u8>>) -> Prefix {
         if pfxs.is_empty() || pfxs[0].is_empty() {
             Prefix::Empty
         } else if pfxs.len() == 1 && pfxs[0].len() == 1 {
-            Prefix::Byte(pfxs[0].as_bytes()[0])
+            Prefix::Byte(pfxs[0][0])
         } else if pfxs.len() >= 2 && pfxs.iter().all(|s| s.len() == 1) {
             let mut set = vec![false; 256];
-            let mut chars = vec![];
+            let mut bytes = vec![];
             for p in pfxs {
-                chars.push(p.as_bytes()[0]);
-                set[p.as_bytes()[0] as usize] = true;
+                bytes.push(p[0]);
+                set[p[0] as usize] = true;
             }
-            Prefix::Bytes { chars: chars, sparse: set }
+            Prefix::Bytes { chars: bytes, sparse: set }
         } else if pfxs.len() == 1 {
             Prefix::Single(SingleSearch::new(pfxs.pop().unwrap()))
         } else {
@@ -77,13 +77,13 @@ impl Prefix {
     /// still needs to run over the prefix input. However, we return the ending
     /// location as well in case the prefix corresponds to the entire regex,
     /// in which case, you need the end of the match.
-    pub fn find(&self, haystack: &str) -> Option<(usize, usize)> {
+    pub fn find(&self, haystack: &[u8]) -> Option<(usize, usize)> {
         use self::Prefix::*;
         match *self {
             Empty => Some((0, 0)),
-            Byte(b) => memchr(b, haystack.as_bytes()).map(|i| (i, i+1)),
+            Byte(b) => memchr(b, haystack).map(|i| (i, i+1)),
             Bytes { ref sparse, .. } => {
-                find_singles(sparse, haystack.as_bytes())
+                find_singles(sparse, haystack)
             }
             Single(ref searcher) => {
                 searcher.find(haystack).map(|i| (i, i + searcher.pat.len()))
@@ -147,8 +147,17 @@ impl Prefix {
             Prefix::Bytes { ref chars, .. } => {
                 chars.iter().map(|&b| format!("{}", b as char)).collect()
             }
-            Prefix::Single(ref searcher) => vec![searcher.pat.clone()],
-            Prefix::Automaton(ref aut) => aut.patterns().to_vec(),
+            Prefix::Single(ref searcher) => {
+                let pat = String::from_utf8(searcher.pat.clone()).unwrap();
+                vec![pat]
+            }
+            Prefix::Automaton(ref aut) => {
+                aut
+                .patterns()
+                .iter()
+                .map(|p| String::from_utf8(p.clone()).unwrap())
+                .collect()
+            }
         }
     }
 }
@@ -167,16 +176,16 @@ impl Prefix {
 /// More analysis needs to be done to test this on different search texts.
 #[derive(Clone, Debug)]
 pub struct SingleSearch {
-    pat: String,
+    pat: Vec<u8>,
     shift: Vec<usize>,
 }
 
 impl SingleSearch {
-    fn new(pat: String) -> SingleSearch {
+    fn new(pat: Vec<u8>) -> SingleSearch {
         assert!(pat.len() >= 1);
         let mut shift = vec![pat.len(); 256];
         for i in 0..(pat.len() - 1) {
-            shift[pat.as_bytes()[i] as usize] = pat.len() - i - 1;
+            shift[pat[i] as usize] = pat.len() - i - 1;
         }
         SingleSearch {
             pat: pat,
@@ -184,9 +193,8 @@ impl SingleSearch {
         }
     }
 
-    fn find(&self, haystack: &str) -> Option<usize> {
-        let pat = self.pat.as_bytes();
-        let haystack = haystack.as_bytes();
+    fn find(&self, haystack: &[u8]) -> Option<usize> {
+        let pat = &*self.pat;
         if haystack.len() < pat.len() {
             return None;
         }

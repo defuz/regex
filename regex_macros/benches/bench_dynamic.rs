@@ -19,10 +19,7 @@ extern crate test;
 // native and dynamic regexes.
 macro_rules! regex(
     ($re:expr) => (
-        match ::regex::Regex::new($re) {
-            Ok(re) => re,
-            Err(err) => panic!("{}", err),
-        }
+        ::regex::Regex::with_engine(None, true, 10 * (1 << 20), $re).unwrap()
     );
 );
 

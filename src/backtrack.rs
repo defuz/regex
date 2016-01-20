@@ -23,7 +23,7 @@
 // the capture groups. In benchmarks, the backtracking engine is roughly twice
 // as fast as the full NFA simulation.
 
-use input::{InputReader, Input, ByteInput};
+use input::{Input, InputAt};
 use inst::InstIdx;
 use program::Program;
 use re::CaptureIdxs;
@@ -42,11 +42,11 @@ const MAX_INPUT_SIZE: usize = 256 * (1 << 10);
 
 /// A backtracking matching engine.
 #[derive(Debug)]
-pub struct Backtrack<'a, 'r, 't, 'c, I> {
+pub struct Backtrack<'a, 'r, 'c, I> {
     prog: &'r Program,
     input: I,
     caps: &'c mut CaptureIdxs,
-    m: &'a mut BackMachine<I>,
+    m: &'a mut BackMachine,
 }
 
 /// Shared cached state between multiple invocations of a backtracking engine
@@ -54,14 +54,14 @@ pub struct Backtrack<'a, 'r, 't, 'c, I> {
 ///
 /// It is exported so that it can be cached by `program::Program`.
 #[derive(Debug)]
-pub struct BackMachine<I> {
-    jobs: Vec<Job<I>>,
+pub struct BackMachine {
+    jobs: Vec<Job>,
     visited: Vec<Bits>,
 }
 
-impl<I: InputReader> BackMachine<I> {
+impl BackMachine {
     /// Create new empty state for the backtracking engine.
-    pub fn new() -> BackMachine<I> {
+    pub fn new() -> BackMachine {
         BackMachine {
             jobs: vec![],
             visited: vec![],
@@ -76,21 +76,20 @@ impl<I: InputReader> BackMachine<I> {
 /// engine must keep track of old capture group values. We use the explicit
 /// stack to do it.
 #[derive(Clone, Copy, Debug)]
-enum Job<I: InputReader> {
-    Inst { pc: InstIdx, at: <<I as InputReader>::Reader as Input>::At },
+enum Job {
+    Inst { pc: InstIdx, at: InputAt },
     SaveRestore { slot: usize, old_pos: Option<usize> },
 }
 
-impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
+impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
     /// Execute the backtracking matching engine.
     ///
     /// If there's a match, `exec` returns `true` and populates the given
     /// captures accordingly.
-    pub fn exec<I: Input>(
+    pub fn exec(
         prog: &'r Program,
-        rdr: I,
         mut caps: &mut CaptureIdxs,
-        input: I::Reader,
+        input: I,
         start: usize,
     ) -> bool {
         let start = input.at(start);
@@ -106,7 +105,7 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
 
     /// Returns true iff the given regex and input can be executed by this
     /// engine with reasonable memory usage.
-    pub fn should_exec(prog: &'r Program, input: &[u8]) -> bool {
+    pub fn should_exec(prog: &'r Program, input: I) -> bool {
         prog.insts.len() <= MAX_PROG_SIZE && input.len() <= MAX_INPUT_SIZE
     }
 
@@ -141,14 +140,10 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
         }
     }
 
-    fn exec_(&mut self, mut at: I::At) -> bool {
+    fn exec_(&mut self, mut at: InputAt) -> bool {
         self.clear();
-        if self.prog.anchored_begin && !at.is_beginning() {
-            return false;
-        }
-        /*
         if self.prog.anchored_begin {
-            return if at > 0 {
+            return if !at.is_beginning() {
                 false
             } else {
                 match self.input.prefix_at(&self.prog.prefixes, at) {
@@ -157,30 +152,27 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
                 }
             };
         }
-        */
         loop {
-            /*
             if !self.prog.prefixes.is_empty() {
                 at = match self.input.prefix_at(&self.prog.prefixes, at) {
                     None => return false,
                     Some(at) => at,
                 };
             }
-            */
             if self.backtrack(at) {
                 return true;
             }
-            if at >= self.input.len() {
+            if at.is_end() {
                 return false;
             }
-            at += 1;
+            at = self.input.at(at.next_pos());
         }
     }
 
     // This `inline(always)` seems to result in about a 10-15% increase in
     // throughput on the `hard` benchmarks (over a standard `inline`). ---AG
     #[inline(always)]
-    fn backtrack(&mut self, start: usize) -> bool {
+    fn backtrack(&mut self, start: InputAt) -> bool {
         self.push(0, start);
         while let Some(job) = self.m.jobs.pop() {
             match job {
@@ -197,7 +189,7 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
         false
     }
 
-    fn step(&mut self, mut pc: InstIdx, mut at: usize) -> bool {
+    fn step(&mut self, mut pc: InstIdx, mut at: InputAt) -> bool {
         use inst::Inst::*;
         loop {
             // This loop is an optimization to avoid constantly pushing/popping
@@ -214,7 +206,7 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
                         // job is popped and the old capture index is restored.
                         let old_pos = self.caps[inst.slot];
                         self.push_save_restore(inst.slot, old_pos);
-                        self.caps[inst.slot] = Some(at);
+                        self.caps[inst.slot] = Some(at.pos());
                     }
                     pc = inst.goto;
                 }
@@ -231,11 +223,27 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
                         return false;
                     }
                 }
+                Char(ref inst) => {
+                    if inst.c == at.char() {
+                        pc = inst.goto;
+                        at = self.input.at(at.next_pos());
+                    } else {
+                        return false;
+                    }
+                }
+                Ranges(ref inst) => {
+                    if inst.matches(at.char()) {
+                        pc = inst.goto;
+                        at = self.input.at(at.next_pos());
+                    } else {
+                        return false;
+                    }
+                }
                 Bytes(ref inst) => {
-                    if let Some(&b) = self.input.get(at) {
-                        if inst.start <= b && b <= inst.end {
+                    if let Some(b) = at.byte() {
+                        if inst.matches(b) {
                             pc = inst.goto;
-                            at += 1;
+                            at = self.input.at(at.next_pos());
                             continue;
                         }
                     }
@@ -248,7 +256,7 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
         }
     }
 
-    fn push(&mut self, pc: InstIdx, at: usize) {
+    fn push(&mut self, pc: InstIdx, at: InputAt) {
         self.m.jobs.push(Job::Inst { pc: pc, at: at });
     }
 
@@ -256,8 +264,8 @@ impl<'a, 'r, 't, 'c, I: Input> Backtrack<'a, 'r, 't, 'c, I> {
         self.m.jobs.push(Job::SaveRestore { slot: slot, old_pos: old_pos });
     }
 
-    fn has_visited(&mut self, pc: InstIdx, at: usize) -> bool {
-        let k = pc * (self.input.len() + 1) + at;
+    fn has_visited(&mut self, pc: InstIdx, at: InputAt) -> bool {
+        let k = pc * (self.input.len() + 1) + at.pos();
         let k1 = k / BIT_SIZE;
         let k2 = (1 << (k & (BIT_SIZE - 1))) as Bits;
         if self.m.visited[k1] & k2 == 0 {

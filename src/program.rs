@@ -10,15 +10,16 @@
 
 use syntax;
 
-use Error;
 use backtrack::{Backtrack, BackMachine};
+use char_utf8::encode_utf8;
 use compile::Compiler;
-use input::{BytesInputReader, InputReader, ByteInput, CharInput};
+use input::{Input, ByteInput, CharInput};
 use inst::{EmptyLook, Inst};
 use nfa::{Nfa, NfaThreads};
 use pool::Pool;
 use prefix::Prefix;
 use re::CaptureIdxs;
+use Error;
 
 const NUM_PREFIX_LIMIT: usize = 30;
 const PREFIX_LENGTH_LIMIT: usize = 15;
@@ -63,24 +64,27 @@ pub struct Program {
     pub anchored_begin: bool,
     /// True iff program is anchored at the end.
     pub anchored_end: bool,
+    /// True iff program should use byte based matching.
+    pub bytes: bool,
     /// The type of matching engine to use.
     /// When `None` (the default), pick an engine automatically.
     pub engine: Option<MatchEngine>,
     /// Cached NFA threads.
     pub nfa_threads: Pool<NfaThreads>,
     /// Cached backtracking memory.
-    pub backtrack: Pool<BackMachine<ByteInput>>,
+    pub backtrack: Pool<BackMachine>,
 }
 
 impl Program {
     /// Compiles a Regex.
     pub fn new(
         engine: Option<MatchEngine>,
+        bytes: bool,
         size_limit: usize,
         re: &str,
     ) -> Result<Program, Error> {
         let expr = try!(syntax::Expr::parse(re));
-        let compiler = Compiler::new(size_limit, true);
+        let compiler = Compiler::new(size_limit, bytes);
         let (insts, cap_names) = try!(compiler.compile(&expr));
         let (insts_len, ncaps) = (insts.len(), num_captures(&insts));
         let create_threads = move || NfaThreads::new(insts_len, ncaps);
@@ -93,6 +97,7 @@ impl Program {
             prefixes_complete: false,
             anchored_begin: false,
             anchored_end: false,
+            bytes: bytes,
             engine: engine,
             nfa_threads: Pool::new(Box::new(create_threads)),
             backtrack: Pool::new(Box::new(create_backtrack)),
@@ -117,15 +122,28 @@ impl Program {
         text: &str,
         start: usize,
     ) -> bool {
-        let rdr = BytesInputReader;
-        let inp = ByteInput::new(text);
-        match self.choose_engine(caps.len(), text.as_bytes()) {
+        if self.bytes {
+            self.exec_input(caps, ByteInput::new(text), start)
+        } else {
+            self.exec_input(caps, CharInput::new(text), start)
+        }
+    }
+
+    fn exec_input<I: Input>(
+        &self,
+        caps: &mut CaptureIdxs,
+        input: I,
+        start: usize,
+    ) -> bool {
+        match self.choose_engine(caps.len(), &input) {
             MatchEngine::Backtrack => {
-                Backtrack::exec(self, rdr, caps, inp, start)
+                Backtrack::exec(self, caps, &input, start)
             }
-            MatchEngine::Nfa => Nfa::exec(self, caps, inp, start),
+            MatchEngine::Nfa => {
+                Nfa::exec(self, caps, input, start)
+            }
             MatchEngine::Literals => {
-                match self.prefixes.find(&text[start..]) {
+                match self.prefixes.find(&input.as_bytes()[start..]) {
                     None => false,
                     Some((s, e)) => {
                         if caps.len() == 2 {
@@ -139,7 +157,11 @@ impl Program {
         }
     }
 
-    fn choose_engine(&self, cap_len: usize, text: &[u8]) -> MatchEngine {
+    fn choose_engine<I: Input>(
+        &self,
+        cap_len: usize,
+        input: I,
+    ) -> MatchEngine {
         // If the engine is already chosen, then we use it.
         // But that might not be a good idea. e.g., What if `Literals` is
         // chosen and it can't work? I guess we should probably check whether
@@ -149,7 +171,7 @@ impl Program {
                && self.prefixes_complete
                && self.prefixes.preserves_priority() {
                 MatchEngine::Literals
-            } else if Backtrack::should_exec(self, text) {
+            } else if Backtrack::should_exec(self, input) {
                 // We're only here if the input and regex combined are small.
                 MatchEngine::Backtrack
             } else {
@@ -186,7 +208,7 @@ impl Program {
         }
     }
 
-    fn alternate_prefixes(&self) -> Option<(Vec<String>, bool)> {
+    fn alternate_prefixes(&self) -> Option<(Vec<Vec<u8>>, bool)> {
         let mut prefixes = vec![];
         let mut pcomplete = true;
         let mut stack = vec![self.skip(1)];
@@ -236,12 +258,13 @@ impl Program {
     /// Returns `true` in the tuple if the end of the literal leads trivially
     /// to a match. (This may report false negatives, but being conservative
     /// is OK.)
-    fn literals(&self, mut pc: usize) -> (Vec<String>, bool) {
+    fn literals(&self, mut pc: usize) -> (Vec<Vec<u8>>, bool) {
         #![allow(unused_assignments)]
         use inst::Inst::*;
 
         let mut complete = true;
-        let mut alts = vec![String::new()];
+        let mut alts = vec![vec![]];
+        let mut scratch = &mut [0; 4];
         loop {
             let inst = &self.insts[pc];
 
@@ -255,10 +278,10 @@ impl Program {
             }
             match *inst {
                 Save(ref inst) => { pc = inst.goto; continue }
-                /*
                 Char(ref inst) => {
                     for alt in &mut alts {
-                        alt.push(inst.c);
+                        let n = encode_utf8(inst.c, scratch).unwrap();
+                        alt.extend(&scratch[0..n]);
                     }
                     pc = inst.goto;
                 }
@@ -278,14 +301,33 @@ impl Program {
                         for c in (s as u32)..(e as u32 + 1){
                             for alt in &orig {
                                 let mut alt = alt.clone();
-                                alt.push(::std::char::from_u32(c).unwrap());
+                                let ch = ::std::char::from_u32(c).unwrap();
+                                let n = encode_utf8(ch, scratch).unwrap();
+                                alt.extend(&scratch[0..n]);
                                 alts.push(alt);
                             }
                         }
                     }
                     pc = inst.goto;
                 }
-                */
+                Bytes(ref inst) => {
+                    let nbytes = (inst.end - inst.start + 1) as usize;
+                    if alts.len() * nbytes > NUM_PREFIX_LIMIT {
+                        complete = false;
+                        break;
+                    }
+
+                    let orig = alts;
+                    alts = Vec::with_capacity(orig.len());
+                    for b in inst.start..(inst.end + 1) {
+                        for alt in &orig {
+                            let mut alt = alt.clone();
+                            alt.push(b);
+                            alts.push(alt);
+                        }
+                    }
+                    pc = inst.goto;
+                }
                 _ => { complete = self.leads_to_match(pc); break }
             }
         }
@@ -328,6 +370,7 @@ impl Clone for Program {
             prefixes_complete: self.prefixes_complete,
             anchored_begin: self.anchored_begin,
             anchored_end: self.anchored_end,
+            bytes: self.bytes,
             engine: self.engine,
             nfa_threads: Pool::new(Box::new(create_threads)),
             backtrack: Pool::new(Box::new(create_backtrack)),
@@ -357,13 +400,12 @@ fn num_chars_in_ranges(ranges: &[(char, char)]) -> usize {
           .fold(0, |acc, len| acc + len) as usize
 }
 
-#[cfg(ignore)]
 #[cfg(test)]
 mod tests {
     use super::Program;
 
     macro_rules! prog {
-        ($re:expr) => { Program::new(None, 1 << 30, $re).unwrap() }
+        ($re:expr) => { Program::new(None, false, 1 << 30, $re).unwrap() }
     }
 
     macro_rules! prefixes {
