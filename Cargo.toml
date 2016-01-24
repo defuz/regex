@@ -34,7 +34,8 @@ test = false
 bench = true
 
 [dependencies]
-aho-corasick = "0.4"
+# aho-corasick = "0.4"
+aho-corasick = { path = "/home/andrew/rust/aho-corasick", version = "0.4" }
 memchr = "0.1"
 regex-syntax = { path = "regex-syntax", version = "0.2" }
 utf8-ranges = "0.1"

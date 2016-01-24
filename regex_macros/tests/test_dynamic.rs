@@ -21,7 +21,7 @@ extern crate regex;
 // regex and the input. Other dynamic tests explicitly set the engine to use.
 macro_rules! regex {
     ($re:expr) => {
-        ::regex::Regex::with_engine(None, true, 10 * (1 << 20), $re).unwrap()
+        ::regex::Regex::with_engine(None, false, 10 * (1 << 20), $re).unwrap()
     }
 }
 

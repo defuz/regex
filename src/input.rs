@@ -11,7 +11,7 @@
 use std::ops;
 
 use char::Char;
-use prefix::Prefix;
+use literals::Literals;
 
 /// Represents a location in the input.
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +78,7 @@ pub trait Input {
     fn previous_char(&self, at: InputAt) -> Char;
 
     /// Scan the input for a matching prefix.
-    fn prefix_at(&self, prefixes: &Prefix, at: InputAt) -> Option<InputAt>;
+    fn prefix_at(&self, prefixes: &Literals, at: InputAt) -> Option<InputAt>;
 
     /// The number of bytes in the input.
     fn len(&self) -> usize;
@@ -90,7 +90,7 @@ impl<'a, T: Input> Input for &'a T {
     fn at(&self, i: usize) -> InputAt { (**self).at(i) }
     fn next_char(&self, at: InputAt) -> Char { (**self).next_char(at) }
     fn previous_char(&self, at: InputAt) -> Char { (**self).previous_char(at) }
-    fn prefix_at(&self, prefixes: &Prefix, at: InputAt) -> Option<InputAt> {
+    fn prefix_at(&self, prefixes: &Literals, at: InputAt) -> Option<InputAt> {
         (**self).prefix_at(prefixes, at)
     }
     fn len(&self) -> usize { (**self).len() }
@@ -141,7 +141,7 @@ impl<'t> Input for CharInput<'t> {
         self[..at.pos()].chars().rev().next().into()
     }
 
-    fn prefix_at(&self, prefixes: &Prefix, at: InputAt) -> Option<InputAt> {
+    fn prefix_at(&self, prefixes: &Literals, at: InputAt) -> Option<InputAt> {
         prefixes
             .find(&self.as_bytes()[at.pos()..])
             .map(|(s, _)| self.at(at.pos() + s))
@@ -198,7 +198,7 @@ impl<'t> Input for ByteInput<'t> {
         self[..at.pos()].chars().rev().next().into()
     }
 
-    fn prefix_at(&self, prefixes: &Prefix, at: InputAt) -> Option<InputAt> {
+    fn prefix_at(&self, prefixes: &Literals, at: InputAt) -> Option<InputAt> {
         prefixes
             .find(&self.as_bytes()[at.pos()..])
             .map(|(s, _)| self.at(at.pos() + s))

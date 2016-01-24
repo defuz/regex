@@ -11,13 +11,12 @@
 use syntax;
 
 use backtrack::{Backtrack, BackMachine};
-use char_utf8::encode_utf8;
 use compile::Compiler;
 use input::{Input, ByteInput, CharInput};
 use inst::{EmptyLook, Inst};
 use nfa::{Nfa, NfaThreads};
 use pool::Pool;
-use prefix::Prefix;
+use literals::{BuildPrefixes, Literals};
 use re::CaptureIdxs;
 use Error;
 
@@ -57,9 +56,7 @@ pub struct Program {
     pub cap_names: Vec<Option<String>>,
     /// If the regular expression requires a literal prefix in order to have a
     /// match, that prefix is stored here as a DFA.
-    pub prefixes: Prefix,
-    /// True iff matching any literal prefix indicates a match.
-    pub prefixes_complete: bool,
+    pub prefixes: Literals,
     /// True iff program is anchored at the beginning.
     pub anchored_begin: bool,
     /// True iff program is anchored at the end.
@@ -89,12 +86,12 @@ impl Program {
         let (insts_len, ncaps) = (insts.len(), num_captures(&insts));
         let create_threads = move || NfaThreads::new(insts_len, ncaps);
         let create_backtrack = move || BackMachine::new();
+        let prefixes = BuildPrefixes::new(&insts).literals().into_matcher();
         let mut prog = Program {
             original: re.into(),
             insts: insts,
             cap_names: cap_names,
-            prefixes: Prefix::Empty,
-            prefixes_complete: false,
+            prefixes: prefixes,
             anchored_begin: false,
             anchored_end: false,
             bytes: bytes,
@@ -102,8 +99,6 @@ impl Program {
             nfa_threads: Pool::new(Box::new(create_threads)),
             backtrack: Pool::new(Box::new(create_backtrack)),
         };
-
-        prog.find_prefixes();
         prog.anchored_begin = match prog.insts[1] {
             Inst::EmptyLook(ref inst) => inst.look == EmptyLook::StartText,
             _ => false,
@@ -168,7 +163,7 @@ impl Program {
         // the chosen engine is appropriate or not.
         self.engine.unwrap_or_else(|| {
             if cap_len <= 2
-               && self.prefixes_complete
+               && self.prefixes.at_match()
                && self.prefixes.preserves_priority() {
                 MatchEngine::Literals
             } else if Backtrack::should_exec(self, input) {
@@ -190,171 +185,6 @@ impl Program {
     pub fn alloc_captures(&self) -> Vec<Option<usize>> {
         vec![None; 2 * self.num_captures()]
     }
-
-    /// Find and store a prefix machine for the current program.
-    pub fn find_prefixes(&mut self) {
-        // First, look for a standard literal prefix---this includes things
-        // like `a+` and `[0-9]+`, but not `a|b`.
-        let (ps, complete) = self.literals(self.skip(1));
-        if !ps.is_empty() {
-            self.prefixes = Prefix::new(ps);
-            self.prefixes_complete = complete;
-            return;
-        }
-        // Ok, now look for alternate prefixes, e.g., `a|b`.
-        if let Some((pfxs, complete)) = self.alternate_prefixes() {
-            self.prefixes = Prefix::new(pfxs);
-            self.prefixes_complete = complete;
-        }
-    }
-
-    fn alternate_prefixes(&self) -> Option<(Vec<Vec<u8>>, bool)> {
-        let mut prefixes = vec![];
-        let mut pcomplete = true;
-        let mut stack = vec![self.skip(1)];
-        while let Some(mut pc) = stack.pop() {
-            pc = self.skip(pc);
-            match self.insts[pc] {
-                Inst::Split(ref inst) => {
-                    stack.push(inst.goto2);
-                    stack.push(inst.goto1);
-                }
-                _ => {
-                    let (alt_prefixes, complete) = self.literals(pc);
-                    if alt_prefixes.is_empty() {
-                        // If no prefixes could be identified for this
-                        // alternate, then we can't use a prefix machine to
-                        // skip through the input. Thus, we fail and report
-                        // nothing.
-                        return None;
-                    }
-                    if prefixes.len() + alt_prefixes.len() > NUM_PREFIX_LIMIT {
-                        // Arg. We've over-extended ourselves, quit with
-                        // nothing to show for it.
-                        //
-                        // This could happen if the regex is `a|b|c|...`, where
-                        // the number of alternates is too much for us to
-                        // handle given an empirically defined threshold limit.
-                        //
-                        // When this happens, we can't capture all of the
-                        // prefixes, so our prefix machine becomes useless.
-                        // Thus, fail and report nothing.
-                        return None;
-                    }
-                    pcomplete = pcomplete && complete;
-                    prefixes.extend(alt_prefixes);
-                }
-            }
-        }
-        if prefixes.is_empty() {
-            None
-        } else {
-            Some((prefixes, pcomplete))
-        }
-    }
-
-    /// Find required literals starting at the given instruction.
-    ///
-    /// Returns `true` in the tuple if the end of the literal leads trivially
-    /// to a match. (This may report false negatives, but being conservative
-    /// is OK.)
-    fn literals(&self, mut pc: usize) -> (Vec<Vec<u8>>, bool) {
-        #![allow(unused_assignments)]
-        use inst::Inst::*;
-
-        let mut complete = true;
-        let mut alts = vec![vec![]];
-        let mut scratch = &mut [0; 4];
-        loop {
-            let inst = &self.insts[pc];
-
-            // Each iteration adds one character to every alternate prefix *or*
-            // it stops. Thus, the prefix alternates grow in lock step, and it
-            // suffices to check one of them to see if the prefix limit has
-            // been exceeded.
-            if alts[0].len() > PREFIX_LENGTH_LIMIT {
-                complete = false;
-                break;
-            }
-            match *inst {
-                Save(ref inst) => { pc = inst.goto; continue }
-                Char(ref inst) => {
-                    for alt in &mut alts {
-                        let n = encode_utf8(inst.c, scratch).unwrap();
-                        alt.extend(&scratch[0..n]);
-                    }
-                    pc = inst.goto;
-                }
-                Ranges(ref inst) => {
-                    // This adds a new literal for *each* character in this
-                    // range. This has the potential to use way too much
-                    // memory, so we bound it naively for now.
-                    let nchars = num_chars_in_ranges(&inst.ranges);
-                    if alts.len() * nchars > NUM_PREFIX_LIMIT {
-                        complete = false;
-                        break;
-                    }
-
-                    let orig = alts;
-                    alts = Vec::with_capacity(orig.len());
-                    for &(s, e) in &inst.ranges {
-                        for c in (s as u32)..(e as u32 + 1){
-                            for alt in &orig {
-                                let mut alt = alt.clone();
-                                let ch = ::std::char::from_u32(c).unwrap();
-                                let n = encode_utf8(ch, scratch).unwrap();
-                                alt.extend(&scratch[0..n]);
-                                alts.push(alt);
-                            }
-                        }
-                    }
-                    pc = inst.goto;
-                }
-                Bytes(ref inst) => {
-                    let nbytes = (inst.end - inst.start + 1) as usize;
-                    if alts.len() * nbytes > NUM_PREFIX_LIMIT {
-                        complete = false;
-                        break;
-                    }
-
-                    let orig = alts;
-                    alts = Vec::with_capacity(orig.len());
-                    for b in inst.start..(inst.end + 1) {
-                        for alt in &orig {
-                            let mut alt = alt.clone();
-                            alt.push(b);
-                            alts.push(alt);
-                        }
-                    }
-                    pc = inst.goto;
-                }
-                _ => { complete = self.leads_to_match(pc); break }
-            }
-        }
-        if alts[0].is_empty() {
-            (vec![], false)
-        } else {
-            (alts, complete)
-        }
-    }
-
-    fn leads_to_match(&self, pc: usize) -> bool {
-        // I'm pretty sure this is conservative, so it might have some
-        // false negatives.
-        match self.insts[self.skip(pc)] {
-            Inst::Match => true,
-            _ => false,
-        }
-    }
-
-    fn skip(&self, mut pc: usize) -> usize {
-        loop {
-            match self.insts[pc] {
-                Inst::Save(_) => pc += 1,
-                _ => return pc,
-            }
-        }
-    }
 }
 
 impl Clone for Program {
@@ -367,7 +197,6 @@ impl Clone for Program {
             insts: self.insts.clone(),
             cap_names: self.cap_names.clone(),
             prefixes: self.prefixes.clone(),
-            prefixes_complete: self.prefixes_complete,
             anchored_begin: self.anchored_begin,
             anchored_end: self.anchored_end,
             bytes: self.bytes,
@@ -398,90 +227,4 @@ fn num_chars_in_ranges(ranges: &[(char, char)]) -> usize {
     ranges.iter()
           .map(|&(s, e)| 1 + (e as u32) - (s as u32))
           .fold(0, |acc, len| acc + len) as usize
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Program;
-
-    macro_rules! prog {
-        ($re:expr) => { Program::new(None, false, 1 << 30, $re).unwrap() }
-    }
-
-    macro_rules! prefixes {
-        ($re:expr) => {{
-            let p = prog!($re);
-            assert!(!p.prefixes_complete);
-            p.prefixes.prefixes()
-        }}
-    }
-    macro_rules! prefixes_complete {
-        ($re:expr) => {{
-            let p = prog!($re);
-            assert!(p.prefixes_complete);
-            p.prefixes.prefixes()
-        }}
-    }
-
-    #[test]
-    fn single() {
-        assert_eq!(prefixes_complete!("a"), vec!["a"]);
-        assert_eq!(prefixes_complete!("[a]"), vec!["a"]);
-        assert_eq!(prefixes!("a+"), vec!["a"]);
-        assert_eq!(prefixes!("(?:a)+"), vec!["a"]);
-        assert_eq!(prefixes!("(a)+"), vec!["a"]);
-    }
-
-    #[test]
-    fn single_alt() {
-        assert_eq!(prefixes_complete!("a|b"), vec!["a", "b"]);
-        assert_eq!(prefixes_complete!("b|a"), vec!["b", "a"]);
-        assert_eq!(prefixes_complete!("[a]|[b]"), vec!["a", "b"]);
-        assert_eq!(prefixes!("a+|b"), vec!["a", "b"]);
-        assert_eq!(prefixes!("a|b+"), vec!["a", "b"]);
-        assert_eq!(prefixes!("(?:a+)|b"), vec!["a", "b"]);
-        assert_eq!(prefixes!("(a+)|b"), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn many() {
-        assert_eq!(prefixes_complete!("abcdef"), vec!["abcdef"]);
-        assert_eq!(prefixes!("abcdef+"), vec!["abcdef"]);
-        assert_eq!(prefixes!("(?:abcdef)+"), vec!["abcdef"]);
-        assert_eq!(prefixes!("(abcdef)+"), vec!["abcdef"]);
-    }
-
-    #[test]
-    fn many_alt() {
-        assert_eq!(prefixes_complete!("abc|def"), vec!["abc", "def"]);
-        assert_eq!(prefixes_complete!("def|abc"), vec!["def", "abc"]);
-        assert_eq!(prefixes!("abc+|def"), vec!["abc", "def"]);
-        assert_eq!(prefixes!("abc|def+"), vec!["abc", "def"]);
-        assert_eq!(prefixes!("(?:abc)+|def"), vec!["abc", "def"]);
-        assert_eq!(prefixes!("(abc)+|def"), vec!["abc", "def"]);
-    }
-
-    #[test]
-    fn class() {
-        assert_eq!(prefixes_complete!("[0-9]"), vec![
-            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-        ]);
-        assert_eq!(prefixes!("[0-9]+"), vec![
-            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-        ]);
-    }
-
-    #[test]
-    fn preceding_alt() {
-        assert_eq!(prefixes!("(?:a|b).+"), vec!["a", "b"]);
-        assert_eq!(prefixes!("(a|b).+"), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn nested_alt() {
-        assert_eq!(prefixes_complete!("(a|b|c|d)"),
-                   vec!["a", "b", "c", "d"]);
-        assert_eq!(prefixes_complete!("((a|b)|(c|d))"),
-                   vec!["a", "b", "c", "d"]);
-    }
 }

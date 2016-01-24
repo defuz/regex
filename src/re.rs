@@ -249,7 +249,7 @@ impl Regex {
     ///
     /// The default size limit used in `new` is 10MB.
     pub fn with_size_limit(size: usize, re: &str) -> Result<Regex, Error> {
-        Regex::with_engine(None, false, size, re)
+        Regex::with_engine(None, true, size, re)
     }
 
     /// Compiles a dynamic regular expression and uses given matching engine.
