@@ -18,9 +18,10 @@ extern crate test;
 // defined below. Effectively, it allows us to use the same tests for both
 // native and dynamic regexes.
 macro_rules! regex(
-    ($re:expr) => (
-        ::regex::Regex::with_engine(None, true, 10 * (1 << 20), $re).unwrap()
-    );
+    ($re:expr) => {{
+        let e = ::regex::internal::MatchEngine::Automatic;
+        ::regex::Regex::with_engine($re, e, 10 * (1 << 20), false).unwrap()
+    }}
 );
 
 mod bench;

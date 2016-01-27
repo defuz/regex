@@ -19,6 +19,20 @@ fn bench_assert_match(b: &mut Bencher, re: Regex, text: &str) {
 }
 
 #[bench]
+fn compile_simple(b: &mut Bencher) {
+    b.iter(|| {
+        regex!("^bc(d|e)*$")
+    });
+}
+
+#[bench]
+fn compile_unicode(b: &mut Bencher) {
+    b.iter(|| {
+        regex!(r"\p{L}|\p{N}|\s|.")
+    });
+}
+
+#[bench]
 fn no_exponential(b: &mut Bencher) {
     let n = 100;
     let regex_string = format!(

@@ -48,6 +48,20 @@ pub struct Nfa<'r, I> {
     input: I,
 }
 
+/// A cached allocation that can be reused on each execution.
+#[derive(Debug)]
+pub struct NfaCache {
+    threads: NfaThreads,
+}
+
+impl NfaCache {
+    /// Create a new allocation used by the NFA machine to record execution
+    /// and captures.
+    pub fn new() -> Self {
+        NfaCache { threads: NfaThreads::new() }
+    }
+}
+
 impl<'r, I: Input> Nfa<'r, I> {
     /// Execute the NFA matching engine.
     ///
@@ -59,12 +73,13 @@ impl<'r, I: Input> Nfa<'r, I> {
         input: I,
         start: usize,
     ) -> bool {
-        let mut q = prog.nfa_threads.get();
+        let mut cache = prog.cache_nfa();
+        cache.threads.resize(prog.insts.len(), prog.num_captures());
         let at = input.at(start);
         Nfa {
             prog: prog,
             input: input,
-        }.exec_(&mut q, &mut caps, at)
+        }.exec_(&mut cache.threads, &mut caps, at)
     }
 
     fn exec_(
@@ -230,7 +245,7 @@ impl<'r, I: Input> Nfa<'r, I> {
 ///
 /// It is exported so that it can be cached by `program::Program`.
 #[derive(Debug)]
-pub struct NfaThreads {
+struct NfaThreads {
     clist: Threads,
     nlist: Threads,
 }
@@ -249,12 +264,13 @@ struct Thread {
 }
 
 impl NfaThreads {
-    /// Create new empty state for the NFA engine.
-    pub fn new(num_insts: usize, ncaps: usize) -> NfaThreads {
-        NfaThreads {
-            clist: Threads::new(num_insts, ncaps),
-            nlist: Threads::new(num_insts, ncaps),
-        }
+    fn new() -> NfaThreads {
+        NfaThreads { clist: Threads::new(), nlist: Threads::new(), }
+    }
+
+    fn resize(&mut self, num_insts: usize, ncaps: usize) {
+        self.clist.resize(num_insts, ncaps);
+        self.nlist.resize(num_insts, ncaps);
     }
 
     fn swap(&mut self) {
@@ -263,12 +279,20 @@ impl NfaThreads {
 }
 
 impl Threads {
-    fn new(num_insts: usize, ncaps: usize) -> Threads {
-        let t = Thread { pc: 0, caps: vec![None; ncaps * 2] };
-        Threads {
-            dense: vec![t; num_insts],
-            sparse: vec![0; num_insts],
-            size: 0,
+    fn new() -> Threads {
+        Threads { dense: vec![], sparse: vec![], size: 0 }
+    }
+
+    fn resize(&mut self, num_insts: usize, ncaps: usize) {
+        let old_slots = self.dense.get(0).map_or(0, |t| t.caps.len());
+        let new_slots = ncaps * 2;
+        if num_insts != self.dense.len() || old_slots != new_slots {
+            let t = Thread { pc: 0, caps: vec![None; ncaps * 2] };
+            *self = Threads {
+                dense: vec![t; num_insts],
+                sparse: vec![0; num_insts],
+                size: 0,
+            }
         }
     }
 

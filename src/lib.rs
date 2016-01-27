@@ -423,6 +423,7 @@ mod backtrack;
 mod char;
 mod char_utf8;
 mod compile;
+mod exec;
 mod input;
 mod inst;
 mod literals;
@@ -436,9 +437,10 @@ mod re;
 #[doc(hidden)]
 pub mod internal {
     pub use char::Char;
+    pub use exec::MatchEngine;
     pub use input::{Input, CharInput, InputAt};
     pub use inst::{Inst, EmptyLook, InstRanges};
-    pub use program::{Program, MatchEngine};
+    pub use program::Program;
     pub use re::ExNative;
     pub use re::Regex::{Dynamic, Native};
 }

@@ -23,7 +23,7 @@ use aho_corasick::{Automaton, AcAutomaton, FullAcAutomaton};
 use memchr::memchr;
 
 use char_utf8::encode_utf8;
-use inst::{Inst, InstBytes, InstRanges};
+use inst::{Insts, Inst, InstBytes, InstRanges};
 
 pub struct AlternateLiterals {
     at_match: bool,
@@ -122,13 +122,13 @@ impl AlternateLiterals {
 }
 
 pub struct BuildPrefixes<'a> {
-    insts: &'a [Inst],
+    insts: &'a Insts,
     limit: usize,
     alts: AlternateLiterals,
 }
 
 impl<'a> BuildPrefixes<'a> {
-    pub fn new(insts: &'a [Inst]) -> Self {
+    pub fn new(insts: &'a Insts) -> Self {
         BuildPrefixes {
             insts: insts,
             limit: 3000,
@@ -136,17 +136,12 @@ impl<'a> BuildPrefixes<'a> {
         }
     }
 
-    pub fn set_limit(mut self, limit: usize) -> Self {
-        self.limit = limit;
-        self
-    }
-
     pub fn literals(mut self) -> AlternateLiterals {
-        let mut stack = vec![self.skip(1)];
+        let mut stack = vec![self.insts.skip(1)];
         let mut seen = HashSet::new();
         while let Some(mut pc) = stack.pop() {
             seen.insert(pc);
-            pc = self.skip(pc);
+            pc = self.insts.skip(pc);
             if let Inst::Split(ref inst) = self.insts[pc] {
                 if !seen.contains(&inst.goto2) {
                     stack.push(inst.goto2);
@@ -195,25 +190,16 @@ impl<'a> BuildPrefixes<'a> {
         }
         self.alts
     }
-
-    fn skip(&self, mut pc: usize) -> usize {
-        loop {
-            match self.insts[pc] {
-                Inst::Save(ref i) => pc = i.goto,
-                _ => return pc,
-            }
-        }
-    }
 }
 
 pub struct BuildRequiredLiterals<'a> {
-    insts: &'a [Inst],
+    insts: &'a Insts,
     limit: usize,
     alts: AlternateLiterals,
 }
 
 impl<'a> BuildRequiredLiterals<'a> {
-    pub fn new(insts: &'a [Inst]) -> Self {
+    pub fn new(insts: &'a Insts) -> Self {
         BuildRequiredLiterals {
             insts: insts,
             limit: 3000,
@@ -254,7 +240,7 @@ impl<'a> BuildRequiredLiterals<'a> {
                     pc = inst.goto;
                 }
                 Split(_) | EmptyLook(_) | Match => {
-                    self.alts.at_match = self.leads_to_match(pc);
+                    self.alts.at_match = self.insts.leads_to_match(pc);
                     break;
                 }
             }
@@ -300,22 +286,6 @@ impl<'a> BuildRequiredLiterals<'a> {
         }
         self.alts.add_literal_byte_range(inst);
         true
-    }
-
-    fn skip(&self, mut pc: usize) -> usize {
-        loop {
-            match self.insts[pc] {
-                Inst::Save(ref i) => pc = i.goto,
-                _ => return pc,
-            }
-        }
-    }
-
-    fn leads_to_match(&self, pc: usize) -> bool {
-        match self.insts[self.skip(pc)] {
-            Inst::Match => true,
-            _ => false,
-        }
     }
 }
 
@@ -617,7 +587,7 @@ mod tests {
     use program::Program;
 
     macro_rules! prog {
-        ($re:expr) => { Program::new(None, false, 1 << 30, $re).unwrap() }
+        ($re:expr) => { Program::unicode($re, 1 << 30).unwrap() }
     }
 
     macro_rules! prefixes {

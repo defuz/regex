@@ -16,12 +16,14 @@ use utf8_ranges::{Utf8Sequence, Utf8Sequences};
 
 use Error;
 use inst::{
-    EmptyLook,
-    Inst, InstIdx,
+    Insts, Inst, InstIdx, EmptyLook,
     InstSave, InstSplit, InstEmptyLook, InstChar, InstRanges, InstBytes,
 };
 
-pub type Compiled = (Vec<Inst>, Vec<Option<String>>);
+pub struct Compiled {
+    pub insts: Insts,
+    pub cap_names: Vec<Option<String>>,
+}
 
 type InstHoleIdx = InstIdx;
 
@@ -62,7 +64,10 @@ impl Compiler {
         self.push_compiled(Inst::Match);
 
         let insts = self.insts.into_iter().map(|inst| inst.unwrap()).collect();
-        Ok((insts, self.cap_names))
+        Ok(Compiled {
+            insts: Insts::new(insts, self.bytes),
+            cap_names: self.cap_names,
+        })
     }
 
     fn c(&mut self, expr: &Expr) -> CompileResult {

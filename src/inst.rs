@@ -1,9 +1,95 @@
 use std::cmp::Ordering;
+use std::ops::Deref;
 
 use char::Char;
+use literals::{BuildPrefixes, Literals};
 
 /// InstIdx represents the index of an instruction in a regex program.
 pub type InstIdx = usize;
+
+/// Insts is a sequence of instructions.
+#[derive(Clone, Debug)]
+pub struct Insts {
+    insts: Vec<Inst>,
+    bytes: bool,
+}
+
+impl Insts {
+    /// Create a new instruction sequence.
+    ///
+    /// If `bytes` is true, then this instruction sequence must run on raw
+    /// bytes. Otherwise, it is executed on Unicode codepoints.
+    ///
+    /// A Vec<Inst> can be created with the compiler.
+    pub fn new(insts: Vec<Inst>, bytes: bool) -> Self {
+        Insts { insts: insts, bytes: bytes }
+    }
+
+    /// Returns true if and only if this instruction sequence must be executed
+    /// on byte strings.
+    pub fn is_bytes(&self) -> bool {
+        self.bytes
+    }
+
+    /// If pc is an index to a no-op instruction (like Save), then return the
+    /// next pc that is not a no-op instruction.
+    pub fn skip(&self, mut pc: usize) -> usize {
+        loop {
+            match self[pc] {
+                Inst::Save(ref i) => pc = i.goto,
+                _ => return pc,
+            }
+        }
+    }
+
+    /// Return true if and only if an execution engine at instruction `pc` will
+    /// always lead to a match.
+    pub fn leads_to_match(&self, pc: usize) -> bool {
+        match self[self.skip(pc)] {
+            Inst::Match => true,
+            _ => false,
+        }
+    }
+
+    /// Return true if and only if the regex is anchored at the start of
+    /// search text.
+    pub fn anchored_begin(&self) -> bool {
+        match self.get(1) {
+            Some(&Inst::EmptyLook(ref inst)) => {
+                inst.look == EmptyLook::StartText
+            }
+            _ => false,
+        }
+    }
+
+    /// Return true if and only if the regex is anchored at the end of
+    /// search text.
+    pub fn anchored_end(&self) -> bool {
+        match self.get(self.len() - 3) {
+            Some(&Inst::EmptyLook(ref inst)) => {
+                inst.look == EmptyLook::EndText
+            }
+            _ => false,
+        }
+    }
+
+    /// Build a matching engine for all prefix literals in this instruction
+    /// sequence.
+    ///
+    /// If there are no prefix literals (or there are too many), then a
+    /// matching engine that never matches is returned.
+    pub fn prefix_matcher(&self) -> Literals {
+        BuildPrefixes::new(self).literals().into_matcher()
+    }
+}
+
+impl Deref for Insts {
+    type Target = [Inst];
+
+    fn deref(&self) -> &Self::Target {
+        &*self.insts
+    }
+}
 
 /// Inst is an instruction code in a Regex program.
 #[derive(Clone, Debug)]

@@ -33,6 +33,13 @@ const BIT_SIZE: usize = 32;
 const MAX_PROG_SIZE: usize = 100;
 const MAX_INPUT_SIZE: usize = 256 * (1 << 10);
 
+
+/// Returns true iff the given regex and input can be executed by this
+/// engine with reasonable memory usage.
+pub fn should_exec(num_insts: usize, text_len: usize) -> bool {
+    num_insts <= MAX_PROG_SIZE && text_len <= MAX_INPUT_SIZE
+}
+
 // Total memory usage in bytes is determined by:
 //
 //   ((len(insts) * (len(input) + 1) + bits - 1) / bits) / (bits / 8)
@@ -46,26 +53,21 @@ pub struct Backtrack<'a, 'r, 'c, I> {
     prog: &'r Program,
     input: I,
     caps: &'c mut CaptureIdxs,
-    m: &'a mut BackMachine,
+    m: &'a mut BacktrackCache,
 }
 
 /// Shared cached state between multiple invocations of a backtracking engine
 /// in the same thread.
-///
-/// It is exported so that it can be cached by `program::Program`.
 #[derive(Debug)]
-pub struct BackMachine {
+pub struct BacktrackCache {
     jobs: Vec<Job>,
     visited: Vec<Bits>,
 }
 
-impl BackMachine {
-    /// Create new empty state for the backtracking engine.
-    pub fn new() -> BackMachine {
-        BackMachine {
-            jobs: vec![],
-            visited: vec![],
-        }
+impl BacktrackCache {
+    /// Create new empty cache for the backtracking engine.
+    pub fn new() -> Self {
+        BacktrackCache { jobs: vec![], visited: vec![] }
     }
 }
 
@@ -93,7 +95,7 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
         start: usize,
     ) -> bool {
         let start = input.at(start);
-        let mut m = prog.backtrack.get();
+        let mut m = prog.cache_backtrack();
         let mut b = Backtrack {
             prog: prog,
             input: input,
@@ -101,12 +103,6 @@ impl<'a, 'r, 'c, I: Input> Backtrack<'a, 'r, 'c, I> {
             m: &mut m,
         };
         b.exec_(start)
-    }
-
-    /// Returns true iff the given regex and input can be executed by this
-    /// engine with reasonable memory usage.
-    pub fn should_exec(prog: &'r Program, input: I) -> bool {
-        prog.insts.len() <= MAX_PROG_SIZE && input.len() <= MAX_INPUT_SIZE
     }
 
     fn clear(&mut self) {
